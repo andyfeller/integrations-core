@@ -3,15 +3,10 @@
 # Licensed under Simplified BSD License (see LICENSE)
 
 # stdlib
-import re
-import traceback
-from contextlib import closing, contextmanager
-from collections import defaultdict
 
 # 3p
 
 # project
-from config import _is_affirmative
 from checks.prometheus_check import PrometheusCheck
 
 class MixerCheck(PrometheusCheck):
