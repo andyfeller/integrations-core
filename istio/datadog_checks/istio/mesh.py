@@ -22,10 +22,10 @@ class IstioMeshCheck(PrometheusCheck):
         self.NAMESPACE = 'istio.mesh'
 
         self.metrics_mapper = {
-            'istio_request_count': 'istio_request_count',
-            'istio_request_duration': 'istio_request_duration',
-            'istio_request_size': 'istio_request_size',
-            'istio_response_size': 'istio_response_size',
+            'istio_request_count': 'request.count',
+            'istio_request_duration': 'request.duration',
+            'istio_request_size': 'request.size',
+            'istio_response_size': 'response.size',
         }
         self.ignore_metrics = []
         self.label_joins = {}

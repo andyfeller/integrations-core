@@ -13,7 +13,3 @@ instances:
   - istio_mesh_endpoint: http://localhost:42422/metrics
     mixer_endpoint: http://localhost:9093/metrics
     send_histograms_buckets: true
-    # Tags are reported as set by kube-state-metrics. If you want to translate
-    # them to other tags, you can use the labels_mapper dictionary
-    # labels_mapper:
-    #   namespace: kube_namespace
