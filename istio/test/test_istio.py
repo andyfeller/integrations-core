@@ -98,8 +98,6 @@ class MockResponse:
     def close(self):
         pass
 
-
-@attr(requires='istio')
 class TestIstio(AgentCheckTest):
     CHECK_NAME = 'istio'
 
