@@ -9,7 +9,9 @@ import os
 # 3rd-party
 
 # project
-from tests.checks.common import AgentCheckTest
+from datadog_checks.istio import Istio
+
+
 
 MESH_METRICS = ['istio.mesh.request.count',
                 'istio.mesh.request.duration.count',
@@ -95,28 +97,35 @@ class MockResponse:
     def close(self):
         pass
 
-class TestIstio(AgentCheckTest):
-    CHECK_NAME = 'istio'
 
-    @mock.patch('checks.prometheus_check.PrometheusCheck.poll')
-    def test_istio(self, mock_poll):
-        mesh_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mesh.txt')
-        mixer_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mixer.txt')
-        responses = []
-        with open(mesh_file_path, 'rb') as f:
-            responses.append(f.read())
-        with open(mixer_file_path, 'rb') as f:
-            responses.append(f.read())
-        mock_poll.return_value = MockResponse(responses, 'text/plain')
+@pytest.fixture
+def aggregator():
+    from datadog_checks.stubs import aggregator
+    aggregator.reset()
+    return aggregator
 
-        config = {'instances': [{
-            'istio_mesh_endpoint': 'http://localhost:42422/metrics',
-            'mixer_endpoint': 'http://localhost:9093/metrics'
-        }]}
-        self.run_check(config)
 
-        metrics = MESH_METRICS + MIXER_METRICS
-        for metric in metrics:
-            self.assertMetric(metric)
+@mock.patch('checks.prometheus_check.PrometheusCheck.poll')
+def test_istio(aggregator):
+    mesh_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mesh.txt')
+    mixer_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mixer.txt')
+    responses = []
+    with open(mesh_file_path, 'rb') as f:
+        responses.append(f.read())
+    with open(mixer_file_path, 'rb') as f:
+        responses.append(f.read())
+    mock_poll.return_value = MockResponse(responses, 'text/plain')
 
-        self.coverage_report()
+    instance = {
+        'istio_mesh_endpoint': 'http://localhost:42422/metrics',
+        'mixer_endpoint': 'http://localhost:9093/metrics'
+    }
+
+    c = Istio('istio', None, {}, [instance])
+    c.check(instance)
+
+    metrics = MESH_METRICS + MIXER_METRICS
+    for metric in metrics:
+        self.assertMetric(metric)
+
+    self.coverage_report()

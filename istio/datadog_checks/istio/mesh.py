@@ -7,7 +7,7 @@
 # 3p
 
 # project
-from checks.prometheus_check import PrometheusCheck
+from datadog_checks.checks.prometheus_check import PrometheusCheck
 
 
 class IstioMeshCheck(PrometheusCheck):

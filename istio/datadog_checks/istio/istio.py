@@ -7,7 +7,7 @@
 # 3p
 
 # project
-from checks import AgentCheck
+from datadog_checks.checks import AgentCheck
 from . import mesh, mixer
 
 
