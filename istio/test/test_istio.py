@@ -7,11 +7,8 @@ import mock
 import os
 
 # 3rd-party
-from nose.plugins.attrib import attr
 
 # project
-from checks import AgentCheck
-from utils.platform import Platform
 from tests.checks.common import AgentCheckTest
 
 MESH_METRICS = ['istio.mesh.request.count',
