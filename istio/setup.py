@@ -61,8 +61,7 @@ setup(
     # $ pip install -e .[dev]
     extras_require={
         'dev': [
-            'check-manifest',
-            'datadog_agent_tk>=5.15',
+            'check-manifest'
         ],
     },
 
