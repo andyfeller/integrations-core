@@ -105,18 +105,6 @@ def aggregator():
     aggregator.reset()
     return aggregator
 
-@pytest.fixture
-def mock_poll():
-    from checks.prometheus_check import PrometheusCheck
-    mesh_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mesh.txt')
-    mixer_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mixer.txt')
-    responses = []
-    with open(mesh_file_path, 'rb') as f:
-        responses.append(f.read())
-    with open(mixer_file_path, 'rb') as f:
-        responses.append(f.read())
-
-@mock.patch('checks.prometheus_check.PrometheusCheck.poll')
 def test_istio(aggregator):
     mesh_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mesh.txt')
     mixer_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mixer.txt')
@@ -125,12 +113,16 @@ def test_istio(aggregator):
         responses.append(f.read())
     with open(mixer_file_path, 'rb') as f:
         responses.append(f.read())
-    mock_poll.return_value = MockResponse(responses, 'text/plain')
 
     instance = {
         'istio_mesh_endpoint': 'http://localhost:42422/metrics',
         'mixer_endpoint': 'http://localhost:9093/metrics'
     }
+
+    p = mock.patch('checks.prometheus_check.PrometheusCheck.poll',
+                return_value=MockResponse(responses, 'text/plain'),
+                __name__="poll")
+    p.start()
 
     c = Istio('istio', None, {}, [instance])
     c.check(instance)
