@@ -7,6 +7,7 @@ import mock
 import os
 
 # 3rd-party
+import pytest
 
 # project
 from datadog_checks.istio import Istio
@@ -104,6 +105,16 @@ def aggregator():
     aggregator.reset()
     return aggregator
 
+@pytest.fixture
+def mock_poll():
+    from checks.prometheus_check import PrometheusCheck
+    mesh_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mesh.txt')
+    mixer_file_path = os.path.join(os.path.dirname(__file__), 'ci', 'fixtures', 'istio', 'mixer.txt')
+    responses = []
+    with open(mesh_file_path, 'rb') as f:
+        responses.append(f.read())
+    with open(mixer_file_path, 'rb') as f:
+        responses.append(f.read())
 
 @mock.patch('checks.prometheus_check.PrometheusCheck.poll')
 def test_istio(aggregator):
@@ -126,6 +137,6 @@ def test_istio(aggregator):
 
     metrics = MESH_METRICS + MIXER_METRICS
     for metric in metrics:
-        self.assertMetric(metric)
+        aggregator.assert_metric(metric)
 
-    self.coverage_report()
+    assert aggregator.metrics_asserted_pct == 100.0
