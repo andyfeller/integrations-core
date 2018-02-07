@@ -2,7 +2,7 @@ init_config:
 
 instances:
     # url of the kubelet metrics endpoint
-  - metrics_endpoint: http://10.8.0.1:10255/metrics
+  - metrics_endpoint: http://10.8.0.1:10255/metrics/cadvisor
     #
     # The histogram buckets can be noisy and generate a lot of tags.
     # send_histograms_buckets controls whether or not you want to pull them.
