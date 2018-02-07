@@ -3,22 +3,16 @@
 # Licensed under Simplified BSD License (see LICENSE)
 
 # stdlib
-import calendar
 import logging
 import re
-import time
-from collections import defaultdict
 from urlparse import urljoin
 
 # 3p
 import requests
-import simplejson as json
 
 # project
 from checks import AgentCheck, CheckException
 from checks.prometheus_check import PrometheusCheck
-from config import _is_affirmative
-from utils.service_discovery.sd_backend import get_sd_backend
 # TODO: support Agent 5
 # try:
 #     from kubeutil import get_connection_info
@@ -30,10 +24,8 @@ METRIC_TYPES = ['counter', 'gauge', 'summary']
 # container-specific metrics should have all these labels
 CONTAINER_LABELS = ['container_name', 'namespace', 'pod_name', 'name', 'image', 'id']
 
-DEFAULT_LABEL_PREFIX = 'kube_'
-DEFAULT_TLS_VERIFY = True
 KUBELET_HEALTH_PATH = '/healthz'
-MACHINE_INFO_PATH = '/spec'
+NODE_SPEC_PATH = '/spec'
 POD_LIST_PATH = '/pods/'
 
 # Suffixes per
@@ -62,10 +54,7 @@ log = logging.getLogger('collector')
 class KubeletCheck(PrometheusCheck):
     """
     Collect container metrics from Kubelet.
-    Custom container metrics are not supported anymore as kubelet in Kubernetes 1.6+
-    switched to the CRI implementation which does not expose custom metrics.
     """
-
     def __init__(self, name, init_config, agentConfig, instances=None):
         super(KubeletCheck, self).__init__(name, init_config, agentConfig, instances)
         self.NAMESPACE = 'kubelet'
@@ -81,7 +70,7 @@ class KubeletCheck(PrometheusCheck):
         self.kube_node_labels = inst.get('node_labels_to_host_tags', {})
         self.pod_list_url = urljoin(self.kubelet_conn_info['url'], POD_LIST_PATH)
         self.kube_health_url = urljoin(self.kubelet_api_url, KUBELET_HEALTH_PATH)
-        self.machine_info_url = urljoin(self.kubelet_api_url, MACHINE_INFO_PATH)
+        self.node_spec_url = urljoin(self.kubelet_api_url, NODE_SPEC_PATH)
 
         self.metrics_mapper = {
             'kubelet_runtime_operations_errors': 'kubelet.runtime.errors',
@@ -162,46 +151,23 @@ class KubeletCheck(PrometheusCheck):
     def retrieve_pod_list(self):
         return self.perform_kubelet_query(self.pod_list_url).json()
 
-    def retrieve_machine_info(self):
+    def retrieve_node_spec(self):
         """
-        Retrieve machine info from kubelet.
+        Retrieve node spec from kubelet.
         """
-        machine_info = self.perform_kubelet_query(self.machine_info_url).json()
-        # TODO: replace with something node local, or using the DCA
-        # try:
-        #     _, node_name = self.get_node_info()
-        #     request_url = "%s/nodes/%s" % (self.kubernetes_api_url, node_name)
-        #     node_status = self.retrieve_json_auth(request_url).json()['status']
-        #     machine_info['pods'] = node_status.get('capacity', {}).get('pods')
-        #     machine_info['allocatable'] = node_status.get('allocatable', {})
-        # except Exception as ex:
-        #     log.debug("Failed to get node info from the apiserver: %s" % str(ex))
-        return machine_info
+        node_spec = self.perform_kubelet_query(self.node_spec_url).json()
+        # TODO: report allocatable for cpu, mem, and pod capacity
+        # if we can get it locally or thru the DCA instead of the /nodes endpoint directly
+        return node_spec
 
     def _report_node_metrics(self, instance_tags):
-        # TODO: find if we can report pod capacity and allocatable resources locally.
-        # TODO: find if /spec can report in json, right now this doesn't work
-        machine_info = self.retrieve_machine_info()
-        num_cores = machine_info.get('num_cores', 0)
-        memory_capacity = machine_info.get('memory_capacity', 0)
-        pod_capacity = machine_info.get('pods')
+        node_spec = self.retrieve_node_spec()
+        num_cores = node_spec.get('num_cores', 0)
+        memory_capacity = node_spec.get('memory_capacity', 0)
 
         tags = instance_tags
         self.gauge(self, self.NAMESPACE + '.cpu.capacity', float(num_cores), tags)
         self.gauge(self, self.NAMESPACE + '.memory.capacity', float(memory_capacity), tags)
-        if pod_capacity:
-            self.gauge(self, self.NAMESPACE + '.pods.capacity', float(pod_capacity), tags)
-
-        # extracted from the apiserver, may be missing
-        # TODO: find a local source for this - or use the DCA
-        # for res, val in machine_info.get('allocatable', {}).iteritems():
-        #     try:
-        #         m_name = self.NAMESPACE + '.{}.allocatable'.format(res)
-        #         if res == 'memory':
-        #             val = self.kubeutil.parse_quantity(val)
-        #         self.gauge(self, m_name, float(val), tags)
-        #     except Exception as ex:
-        #         self.log.warning("Failed to report metric %s. Err: %s" % (m_name, str(ex)))
 
     def _perform_kubelet_check(self, instance_tags):
         """Runs local service checks"""
@@ -244,8 +210,8 @@ class KubeletCheck(PrometheusCheck):
         tagged by service and creator.
         """
         for pod in pods['items']:
-            pod_id = pod.get('metadata', {}).get('ID')
-            tags = get_tags(pod_id) or None
+            pod_id = pod.get('metadata', {}).get('uid')
+            tags = get_tags('kubernetes_pod://%s' % pod_id) or None
             if not tags:
                 continue
             self.gauge(self, self.NAMESPACE + '.pods.running', 1, tags)
@@ -291,6 +257,22 @@ class KubeletCheck(PrometheusCheck):
                 unit += c
         return float(number) * FACTORS.get(unit, 1)
 
+    def _is_container_metric(self, metric):
+        """
+        Return whether a metric is about a container or not.
+        It can be about pods, or even higher levels in the cgroup hierarchy
+        and we don't want to report on that.
+        """
+        for l in CONTAINER_LABELS:
+            if l == 'container_name':
+                for ml in metric.label:
+                    if ml.name == l:
+                        if ml.value == 'POD':
+                            return False
+            elif l not in [ml.name for ml in metric.label]:
+                return False
+        return True
+
     def _is_pod_metric(self, metric):
         """
         Return whether a metric is about a pod or not.
@@ -309,39 +291,42 @@ class KubeletCheck(PrometheusCheck):
                 return True
         return False
 
-    def _is_container_metric(self, metric):
-        """
-        Return whether a metric is about a container or not.
-        It can be about pods, or even higher levels in the cgroup hierarchy
-        and we don't want to report on that.
-        """
-        for l in CONTAINER_LABELS:
-            if l == 'container_name':
-                for ml in metric.label:
-                    if ml.name == l:
-                        if ml.value == 'POD':
-                            return False
-            elif l not in [ml.name for ml in metric.label]:
-                return False
-        return True
+    def _get_container_label(self, labels, l_name):
+        for label in labels:
+            if label.name == l_name:
+                return label.value
 
-    def _get_container_id(self, labels):
+    def _get_pod_uid(self, labels):
         for label in labels:
             if label.name == 'id':
-                return label.value
-        return None
+                parts = label.value.split('/')
+                for part in parts:
+                    if part.startswith('pod'):
+                        return part.lstrip('pod')
 
-    def container_cpu_usage_seconds_total(self, message, **kwargs):
-        # TODO: this is now a pod metric, need a new pod uid --> pod name index
-        metric_name = self.NAMESPACE + '.cpu.usage.total'
+    def _process_container_rate(self, metric_name, message):
+        """Takes a simple metric about a container, reports it as a rate."""
         if message.type >= len(METRIC_TYPES):
             self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
             return
 
         for metric in message.metric:
             if self._is_container_metric(metric):
-                c_id = self._get_container_id(metric.label)
+                c_id = self._get_container_label(metric.label, 'id')
                 tags = get_tags('docker://%s' % c_id)
+                val = getattr(metric, METRIC_TYPES[message.type]).value
+                self.rate(self, metric_name, val, tags)
+
+    def _process_pod_rate(self, metric_name, message):
+        """Takes a simple metric about a pod, reports it as a rate."""
+        if message.type >= len(METRIC_TYPES):
+            self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
+            return
+
+        for metric in message.metric:
+            if self._is_pod_metric(metric):
+                pod_uid = self._get_pod_uid(metric.label)
+                tags = get_tags('kubernetes_pod://%s' % pod_uid)
                 val = getattr(metric, METRIC_TYPES[message.type]).value
                 self.rate(self, metric_name, val, tags)
 
@@ -355,17 +340,14 @@ class KubeletCheck(PrometheusCheck):
         seen_keys = {k: False for k in cache}
         for metric in message.metric:
             if self._is_container_metric(metric):
-                c_id = self._get_container_id(metric.label)
+                c_id = self._get_container_label(metric.label, 'id')
+                c_name = self._get_container_label(metric.label, 'name')
+                if not c_name:
+                    continue
                 tags = get_tags('docker://%s' % c_id)
-                c_name = None
-                for t in tags:
-                    if t.split(':', 1)[0] == 'container_name':
-                        c_name = t.split(':', 1)[1]
-                        break
                 val = getattr(metric, METRIC_TYPES[message.type]).value
-                if c_name:
-                    cache[c_name] = (val, tags)
-                    seen_keys[c_name] = True
+                cache[c_name] = (val, tags)
+                seen_keys[c_name] = True
                 self.gauge(self, m_name, val, tags)
 
         # purge the cache
@@ -382,7 +364,7 @@ class KubeletCheck(PrometheusCheck):
         for metric in message.metric:
             if self._is_container_metric(metric):
                 limit = getattr(metric, METRIC_TYPES[message.type]).value
-                c_id = self._get_container_id(metric.label)
+                c_id = self._get_container_label(metric.label, 'id')
                 tags = get_tags('docker://%s' % c_id)
 
                 if m_name:
@@ -390,22 +372,55 @@ class KubeletCheck(PrometheusCheck):
 
                 if pct_m_name and limit > 0:
                     usage = None
-                    c_name = ''
-                    for lbl in metric.label:
-                        if lbl.name == 'name':
-                            c_name = lbl.value
-                            usage, tags = cache.get(c_name, (None, None))
-                            break
+                    c_name = self._get_container_label(metric.label, 'name')
+                    if not c_name:
+                        continue
+                    usage, tags = cache.get(c_name, (None, None))
                     if usage:
                         self.gauge(self, pct_m_name, float(usage/float(limit)), tags)
                     else:
                         self.log.debug("No corresponding usage found for metric %s and "
                                        "container %s, skipping usage_pct for now." % (pct_m_name, c_name))
 
+    def container_cpu_usage_seconds_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.cpu.usage.total'
+        self._process_container_rate(metric_name, message)
+
+    def container_fs_reads_bytes_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.io.read_bytes'
+        self._process_container_rate(metric_name, message)
+
+    def container_fs_writes_bytes_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.io.write_bytes'
+        self._process_container_rate(metric_name, message)
+
+    def container_network_receive_bytes_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.rx_bytes'
+        self._process_pod_rate(metric_name, message)
+
+    def container_network_transmit_bytes_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.tx_bytes'
+        self._process_pod_rate(metric_name, message)
+
+    def container_network_receive_errors_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.rx_errors'
+        self._process_pod_rate(metric_name, message)
+
+    def container_network_transmit_errors_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.tx_errors'
+        self._process_pod_rate(metric_name, message)
+
+    def container_network_transmit_packets_dropped_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.tx_dropped'
+        self._process_pod_rate(metric_name, message)
+
+    def container_network_receive_packets_dropped_total(self, message, **kwargs):
+        metric_name = self.NAMESPACE + '.network.rx_dropped'
+        self._process_pod_rate(metric_name, message)
+
     def container_fs_usage_bytes(self, message, **kwargs):
         """
         Number of bytes that are consumed by the container on this filesystem.
-        TODO: container_fs_reads_bytes_total and writes
         """
         metric_name = self.NAMESPACE + '.filesystem.usage'
         if message.type >= len(METRIC_TYPES):
@@ -433,62 +448,9 @@ class KubeletCheck(PrometheusCheck):
         self._process_usage_metric(metric_name, message, self.mem_usage_bytes)
 
     def container_spec_memory_limit_bytes(self, message, **kwargs):
-        """TODO: compare with pod spec metrics and kill if redundant"""
         metric_name = self.NAMESPACE + '.memory.limits'
+        pct_m_name = self.NAMESPACE + '.memory.usage_pct'
         if message.type >= len(METRIC_TYPES):
             self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
             return
-
-        for metric in message.metric:
-            if self._is_container_metric(metric):
-                usage = None
-                c_name = ''
-                for lbl in metric.label:
-                    if lbl.name == 'name':
-                        c_name = lbl.value
-                        usage, tags = self.mem_usage_bytes.get(c_name, (None, None))
-
-                if usage and tags:
-                    limit = getattr(metric, METRIC_TYPES[message.type]).value
-                    if limit > 0:
-                        self.gauge(self, metric_name, float(usage/float(limit)), tags)
-                else:
-                    self.log.debug("No mem usage found for container %s, skipping usage_pct for now." % c_name)
-
-    def _process_pod_rate(self, metric_name, message):
-        """Takes a simple metric about a pod, reports it as a rate."""
-        if message.type >= len(METRIC_TYPES):
-            self.log.error("Metric type %s unsupported for metric %s" % (message.type, message.name))
-            return
-
-        for metric in message.metric:
-            if self._is_pod_metric(metric):
-                c_id = self._get_container_id(metric.label)
-                tags = get_tags('docker://%s' % c_id)
-                val = getattr(metric, METRIC_TYPES[message.type]).value
-                self.rate(self, metric_name, val, tags)
-
-    def container_network_receive_bytes_total(self, message, **kwargs):
-        """TODO: refactor this and the following 5 metrics"""
-        metric_name = self.NAMESPACE + '.network.rx_bytes'
-        self._process_pod_rate(metric_name, message)
-
-    def container_network_transmit_bytes_total(self, message, **kwargs):
-        metric_name = self.NAMESPACE + '.network.tx_bytes'
-        self._process_pod_rate(metric_name, message)
-
-    def container_network_receive_errors_total(self, message, **kwargs):
-        metric_name = self.NAMESPACE + '.network.rx_errors'
-        self._process_pod_rate(metric_name, message)
-
-    def container_network_transmit_errors_total(self, message, **kwargs):
-        metric_name = self.NAMESPACE + '.network.tx_errors'
-        self._process_pod_rate(metric_name, message)
-
-    def container_network_transmit_packets_dropped_total(self, message, **kwargs):
-        metric_name = self.NAMESPACE + '.network.tx_dropped'
-        self._process_pod_rate(metric_name, message)
-
-    def container_network_receive_packets_dropped_total(self, message, **kwargs):
-        metric_name = self.NAMESPACE + '.network.rx_dropped'
-        self._process_pod_rate(metric_name, message)
+        self._process_limit_metric(metric_name, message, self.mem_usage_bytes, pct_m_name)
