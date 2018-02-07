@@ -2,14 +2,54 @@
 # All rights reserved
 # Licensed under Simplified BSD License (see LICENSE)
 from __future__ import unicode_literals
+from datetime import datetime
 
 import pytest
+import mock
 from mock import MagicMock
 
 from datadog_checks.vsphere import VSphereCheck
 from datadog_checks.vsphere.vsphere import MORLIST, INTERVAL, METRICS_METADATA
+from datadog_checks.vsphere.common import SOURCE_TYPE
 from .utils import create_topology, assertMOR
 from .utils import MockedContainer, MockedMOR
+
+
+@pytest.fixture
+def instance():
+    """
+    Return a default instance
+    """
+    return {'name': 'vsphere_mock'}
+
+
+@pytest.fixture
+def vsphere():
+    """
+    Provide a check instance with mocked parts
+    """
+    # create topology from a fixture file
+    vcenter_topology = create_topology('vsphere_topology.json')
+    # mock pyvmomi stuff
+    view_mock = MockedContainer(topology=vcenter_topology)
+    viewmanager_mock = MagicMock(**{'CreateContainerView.return_value': view_mock})
+    event_mock = MagicMock(createdTime=datetime.now())
+    eventmanager_mock = MagicMock(latestEvent=event_mock)
+    content_mock = MagicMock(viewManager=viewmanager_mock, eventManager=eventmanager_mock)
+    # assemble the mocked server
+    server_mock = MagicMock()
+    server_mock.configure_mock(**{
+        'RetrieveContent.return_value': content_mock,
+        'content': content_mock,
+    })
+    # create a check instance
+    check = VSphereCheck('disk', {}, {}, [instance()])
+    # patch the check instance
+    check._get_server_instance = MagicMock(return_value=server_mock)
+    # disable the thread pool
+    check.pool = MagicMock(apply_async=lambda func, args: func(*args))
+    check.pool_started = True  # otherwise the mock will be overwritten
+    return check
 
 
 def test_init():
@@ -24,6 +64,7 @@ def test_init():
     check = VSphereCheck('disk', init_config, {}, [{'name': 'vsphere_foo'}])
     assert check.time_started > 0
     assert check.pool_started is False
+    assert len(check.jobs_status) == 0
     assert len(check.server_instances) == 0
     assert len(check.cache_times) == 1
     assert 'vsphere_foo' in check.cache_times
@@ -76,7 +117,7 @@ def test__is_excluded():
     assert VSphereCheck._is_excluded(included_vm, include_regexes, include_only_marked) is True
 
 
-def test__discover_mor():
+def test__discover_mor(vsphere, instance):
     """
     Explore the vCenter infrastructure to discover hosts, virtual machines.
 
@@ -98,8 +139,6 @@ def test__discover_mor():
         ```
     """
     # Samples
-    instance = {'name': 'vsphere_mock'}
-    vcenter_topology = create_topology('vsphere_topology.json')
     tags = ["toto"]
     include_regexes = {
         'host_include': "host[2-9]",
@@ -107,43 +146,74 @@ def test__discover_mor():
     }
     include_only_marked = True
 
-    # mock pyvmomi stuff
-    view_mock = MockedContainer(topology=vcenter_topology)
-    viewmanager_mock = MagicMock(**{'CreateContainerView.return_value': view_mock})
-    content_mock = MagicMock(viewManager=viewmanager_mock)
-    server_mock = MagicMock()
-    server_mock.configure_mock(**{'RetrieveContent.return_value': content_mock})
-
-    check = VSphereCheck('vsphere', {}, {}, [instance])
-    check._get_server_instance = MagicMock(return_value=server_mock)
-    check.pool = MagicMock(apply_async=lambda func, args: func(*args))
-
     # Discover hosts and virtual machines
-    check._discover_mor(instance, tags, include_regexes, include_only_marked)
+    vsphere._discover_mor(instance, tags, include_regexes, include_only_marked)
 
     # Assertions: 1 labaled+monitored VM + 2 hosts + 2 datacenters.
-    assertMOR(check, instance, count=5)
+    assertMOR(vsphere, instance, count=5)
 
-    # ... on hosts
-    assertMOR(check, instance, spec="host", count=2)
+    # ...on hosts
+    assertMOR(vsphere, instance, spec="host", count=2)
     tags = [
         "toto", "vsphere_folder:rootFolder", "vsphere_datacenter:datacenter1",
         "vsphere_compute:compute_resource1", "vsphere_cluster:compute_resource1",
         "vsphere_type:host"
     ]
-    assertMOR(check, instance, name="host2", spec="host", tags=tags)
+    assertMOR(vsphere, instance, name="host2", spec="host", tags=tags)
     tags = [
         "toto", "vsphere_folder:rootFolder", "vsphere_folder:folder1",
         "vsphere_datacenter:datacenter2", "vsphere_compute:compute_resource2",
         "vsphere_cluster:compute_resource2", "vsphere_type:host"
     ]
-    assertMOR(check, instance, name="host3", spec="host", tags=tags)
+    assertMOR(vsphere, instance, name="host3", spec="host", tags=tags)
 
     # ...on VMs
-    assertMOR(check, instance, spec="vm", count=1)
+    assertMOR(vsphere, instance, spec="vm", count=1)
     tags = [
         "toto", "vsphere_folder:folder1", "vsphere_datacenter:datacenter2",
         "vsphere_compute:compute_resource2", "vsphere_cluster:compute_resource2",
         "vsphere_host:host3", "vsphere_type:vm"
     ]
-    assertMOR(check, instance, name="vm4", spec="vm", subset=True, tags=tags)
+    assertMOR(vsphere, instance, name="vm4", spec="vm", subset=True, tags=tags)
+
+
+def test_check(vsphere, instance):
+    """
+    Test the check() method
+    """
+    with mock.patch('datadog_checks.vsphere.vsphere.add_external_tags') as add_external_tags:
+        vsphere.check(instance)
+        add_external_tags.assert_any_call('vm4', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_folder:folder1', 'vsphere_datacenter:datacenter2',
+            'vsphere_cluster:compute_resource2', 'vsphere_compute:compute_resource2',
+            'vsphere_host:host3', 'vsphere_host:host', 'vsphere_type:vm'
+        ])
+        add_external_tags.assert_any_call('host1', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_datacenter:datacenter1', 'vsphere_cluster:compute_resource1',
+            'vsphere_compute:compute_resource1', 'vsphere_type:host'
+        ])
+        add_external_tags.assert_any_call('host3', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_folder:folder1', 'vsphere_datacenter:datacenter2',
+            'vsphere_cluster:compute_resource2', 'vsphere_compute:compute_resource2',
+            'vsphere_type:host'
+        ])
+        add_external_tags.assert_any_call('vm2', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_folder:folder1', 'vsphere_datacenter:datacenter2',
+            'vsphere_cluster:compute_resource2', 'vsphere_compute:compute_resource2',
+            'vsphere_host:host3', 'vsphere_host:host', 'vsphere_type:vm'
+        ])
+        add_external_tags.assert_any_call('vm1', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_folder:folder1', 'vsphere_datacenter:datacenter2',
+            'vsphere_cluster:compute_resource2', 'vsphere_compute:compute_resource2',
+            'vsphere_host:host3', 'vsphere_host:host', 'vsphere_type:vm'
+        ])
+        add_external_tags.assert_any_call('host2', SOURCE_TYPE, [
+            'vcenter_server:vsphere_mock', 'vsphere_folder:rootFolder',
+            'vsphere_datacenter:datacenter1', 'vsphere_cluster:compute_resource1',
+            'vsphere_compute:compute_resource1', 'vsphere_type:host'
+        ])

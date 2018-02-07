@@ -87,6 +87,7 @@ class VSphereCheck(AgentCheck):
         AgentCheck.__init__(self, name, init_config, agentConfig, instances)
         self.time_started = time.time()
         self.pool_started = False
+        self.jobs_status = {}
         self.exceptionq = Queue()
 
         # Connections open to vCenter instances
@@ -166,11 +167,11 @@ class VSphereCheck(AgentCheck):
 
         # Be sure we don't duplicate any event, never query the "past"
         if not last_time:
-            last_time = self.latest_event_query[i_key] = \
-                event_manager.latestEvent.createdTime + timedelta(seconds=1)
+            last_time = event_manager.latestEvent.createdTime + timedelta(seconds=1)
+            self.latest_event_query[i_key] = last_time
 
         query_filter = vim.event.EventFilterSpec()
-        time_filter = vim.event.EventFilterSpec.ByTime(beginTime=self.latest_event_query[i_key])
+        time_filter = vim.event.EventFilterSpec.ByTime(beginTime=last_time)
         query_filter.time = time_filter
 
         try:
@@ -717,13 +718,15 @@ class VSphereCheck(AgentCheck):
                 thread_crashed = True
         except Empty:
             pass
+
         if thread_crashed:
             self.stop_pool()
             raise Exception("One thread in the pool crashed, check the logs")
 
         if add_external_tags is not None:
             for host, tags in self.get_external_host_tags():
-                add_external_tags(host, )
+                print host, SOURCE_TYPE, tags.get(SOURCE_TYPE)
+                add_external_tags(host, SOURCE_TYPE, tags.get(SOURCE_TYPE))
 
         # ## <TEST-INSTRUMENTATION>
         self.gauge('datadog.agent.vsphere.queue_size', self.pool._workq.qsize(), tags=['instant:final'])
