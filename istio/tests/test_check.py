@@ -132,3 +132,5 @@ def test_istio(aggregator):
         aggregator.assert_metric(metric)
 
     assert aggregator.metrics_asserted_pct == 100.0
+
+    assert True is False

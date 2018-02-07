@@ -1,11 +1,9 @@
-from .istio import Istio
-from .__about__ import __version__
+from . import istio
+from .__about__ import __version__ # noqa
 
 Istio = istio.Istio
 
-__version__ = "1.0.0"
-
 __all__ = [
-    'Istio'
+    'istio'
     '__version__'
 ]

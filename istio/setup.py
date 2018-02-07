@@ -70,6 +70,8 @@ setup(
     setup_requires=['pytest-runner',],
     tests_require=get_requirements(path.join('tests', 'requirements.txt')),
 
+    namespace_packages=['datadog_checks'],
+
     # Extra files to ship with the wheel package
     package_data={'datadog_checks.istio': ['conf.yaml.default']},
     include_package_data=True,
