@@ -107,9 +107,10 @@ class KubeletCheck(PrometheusCheck):
         self.mem_usage_bytes = {}
 
     def check(self, instance):
-        endpoint = instance.get('metrics_endpoint')
+        endpoint = instance.get('metrics_endpoint') or self.kubelet_conn_info.get('url')
         if endpoint is None:
-            raise CheckException("Unable to find metrics_endpoint in config file.")
+            raise CheckException("Unable to find metrics_endpoint in config "
+                                 "file or detect the kubelet URL automatically.")
 
         send_buckets = instance.get('send_histograms_buckets', True)
         # By default we send the buckets.
