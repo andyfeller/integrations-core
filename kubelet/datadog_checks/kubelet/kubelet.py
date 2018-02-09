@@ -15,9 +15,9 @@ from checks import AgentCheck, CheckException
 from checks.prometheus_check import PrometheusCheck
 # TODO: support Agent 5
 # try:
-#     from kubeutil import get_connection_info
+#     from utils.kubernetes.kubeutil import get_connection_info
 # except ImportError:
-from utils.kubernetes.kubeutil import get_connection_info
+from kubeutil import get_connection_info
 from tagger import get_tags
 
 METRIC_TYPES = ['counter', 'gauge', 'summary']
@@ -69,8 +69,8 @@ class KubeletCheck(PrometheusCheck):
 
         self.kube_node_labels = inst.get('node_labels_to_host_tags', {})
         self.pod_list_url = urljoin(self.kubelet_conn_info['url'], POD_LIST_PATH)
-        self.kube_health_url = urljoin(self.kubelet_api_url, KUBELET_HEALTH_PATH)
-        self.node_spec_url = urljoin(self.kubelet_api_url, NODE_SPEC_PATH)
+        self.kube_health_url = urljoin(self.kubelet_conn_info['url'], KUBELET_HEALTH_PATH)
+        self.node_spec_url = urljoin(self.kubelet_conn_info['url'], NODE_SPEC_PATH)
 
         self.metrics_mapper = {
             'kubelet_runtime_operations_errors': 'kubelet.runtime.errors',
@@ -139,7 +139,7 @@ class KubeletCheck(PrometheusCheck):
         if not cert[0] or not cert[1]:
             cert = None
 
-        verify = self.kubelet_conn_info.get('ca_cert') or self.kubelet_conn_info['verify_tls']
+        verify = self.kubelet_conn_info.get('ca_cert') or self.kubelet_conn_info.get('verify_tls')
 
         # if cert-based auth is enabled, don't use the token.
         if not cert and url.lower().startswith('https') and 'token' in self.kubelet_conn_info:
@@ -166,8 +166,8 @@ class KubeletCheck(PrometheusCheck):
         memory_capacity = node_spec.get('memory_capacity', 0)
 
         tags = instance_tags
-        self.gauge(self, self.NAMESPACE + '.cpu.capacity', float(num_cores), tags)
-        self.gauge(self, self.NAMESPACE + '.memory.capacity', float(memory_capacity), tags)
+        self.gauge(self.NAMESPACE + '.cpu.capacity', float(num_cores), tags)
+        self.gauge(self.NAMESPACE + '.memory.capacity', float(memory_capacity), tags)
 
     def _perform_kubelet_check(self, instance_tags):
         """Runs local service checks"""
@@ -211,10 +211,10 @@ class KubeletCheck(PrometheusCheck):
         """
         for pod in pods['items']:
             pod_id = pod.get('metadata', {}).get('uid')
-            tags = get_tags('kubernetes_pod://%s' % pod_id) or None
+            tags = get_tags('kubernetes_pod://%s' % pod_id, True) or None
             if not tags:
                 continue
-            self.gauge(self, self.NAMESPACE + '.pods.running', 1, tags)
+            self.gauge(self.NAMESPACE + '.pods.running', 1, tags)
 
     def _report_container_spec_metrics(self, pod_list, instance_tags):
         """Reports pod requests & limits by looking at pod specs."""
@@ -230,19 +230,29 @@ class KubeletCheck(PrometheusCheck):
                     continue
 
                 c_name = ctr.get('name', '')
-                tags = get_tags('docker://%s' % ctr['id'])
+                cid = None
+
+                for ctr_status in pod['status'].get('containerStatuses', []):
+                    if ctr_status.get('name') == c_name:
+                        # it is already prefixed with 'docker://'
+                        cid = ctr_status.get('containerID')
+                        break
+                if not cid:
+                    continue
+
+                tags = get_tags('%s' % cid, True)
 
                 try:
                     for resource, value_str in ctr.get('resources', {}).get('requests', {}).iteritems():
                         value = self.parse_quantity(value_str)
-                        self.gauge(self, '{}.{}.requests'.format(self.NAMESPACE, resource), value, tags)
+                        self.gauge('{}.{}.requests'.format(self.NAMESPACE, resource), value, tags)
                 except (KeyError, AttributeError) as e:
                     self.log.debug("Unable to retrieve container requests for %s: %s", c_name, e)
 
                 try:
                     for resource, value_str in ctr.get('resources', {}).get('limits', {}).iteritems():
                         value = self.parse_quantity(value_str)
-                        self.gauge(self, '{}.{}.limits'.format(self.NAMESPACE, resource), value, tags)
+                        self.gauge('{}.{}.limits'.format(self.NAMESPACE, resource), value, tags)
                 except (KeyError, AttributeError) as e:
                     self.log.debug("Unable to retrieve container limits for %s: %s", c_name, e)
 
@@ -267,7 +277,7 @@ class KubeletCheck(PrometheusCheck):
             if l == 'container_name':
                 for ml in metric.label:
                     if ml.name == l:
-                        if ml.value == 'POD':
+                        if ml.value == '' or ml.value == 'POD':
                             return False
             elif l not in [ml.name for ml in metric.label]:
                 return False
@@ -296,6 +306,16 @@ class KubeletCheck(PrometheusCheck):
             if label.name == l_name:
                 return label.value
 
+    def _get_container_id(self, labels):
+        """
+        Should only be called on a container-scoped metric
+        as it doesn't do any validation of the container id.
+        It simply returns the last part of the cgroup hierarchy.
+        """
+        for label in labels:
+            if label.name == 'id':
+                return label.value.split('/')[-1]
+
     def _get_pod_uid(self, labels):
         for label in labels:
             if label.name == 'id':
@@ -312,10 +332,10 @@ class KubeletCheck(PrometheusCheck):
 
         for metric in message.metric:
             if self._is_container_metric(metric):
-                c_id = self._get_container_label(metric.label, 'id')
-                tags = get_tags('docker://%s' % c_id)
+                c_id = self._get_container_id(metric.label)
+                tags = get_tags('docker://%s' % c_id, True)
                 val = getattr(metric, METRIC_TYPES[message.type]).value
-                self.rate(self, metric_name, val, tags)
+                self.rate(metric_name, val, tags)
 
     def _process_pod_rate(self, metric_name, message):
         """Takes a simple metric about a pod, reports it as a rate."""
@@ -326,9 +346,9 @@ class KubeletCheck(PrometheusCheck):
         for metric in message.metric:
             if self._is_pod_metric(metric):
                 pod_uid = self._get_pod_uid(metric.label)
-                tags = get_tags('kubernetes_pod://%s' % pod_uid)
+                tags = get_tags('kubernetes_pod://%s' % pod_uid, True)
                 val = getattr(metric, METRIC_TYPES[message.type]).value
-                self.rate(self, metric_name, val, tags)
+                self.rate(metric_name, val, tags)
 
     def _process_usage_metric(self, m_name, message, cache):
         """
@@ -340,15 +360,15 @@ class KubeletCheck(PrometheusCheck):
         seen_keys = {k: False for k in cache}
         for metric in message.metric:
             if self._is_container_metric(metric):
-                c_id = self._get_container_label(metric.label, 'id')
+                c_id = self._get_container_id(metric.label)
                 c_name = self._get_container_label(metric.label, 'name')
                 if not c_name:
                     continue
-                tags = get_tags('docker://%s' % c_id)
+                tags = get_tags('docker://%s' % c_id, True)
                 val = getattr(metric, METRIC_TYPES[message.type]).value
                 cache[c_name] = (val, tags)
                 seen_keys[c_name] = True
-                self.gauge(self, m_name, val, tags)
+                self.gauge(m_name, val, tags)
 
         # purge the cache
         for k, seen in seen_keys.iteritems():
@@ -364,11 +384,11 @@ class KubeletCheck(PrometheusCheck):
         for metric in message.metric:
             if self._is_container_metric(metric):
                 limit = getattr(metric, METRIC_TYPES[message.type]).value
-                c_id = self._get_container_label(metric.label, 'id')
-                tags = get_tags('docker://%s' % c_id)
+                c_id = self._get_container_id(metric.label)
+                tags = get_tags('docker://%s' % c_id, True)
 
                 if m_name:
-                    self.gauge(self, m_name, limit, tags)
+                    self.gauge(m_name, limit, tags)
 
                 if pct_m_name and limit > 0:
                     usage = None
@@ -377,7 +397,7 @@ class KubeletCheck(PrometheusCheck):
                         continue
                     usage, tags = cache.get(c_name, (None, None))
                     if usage:
-                        self.gauge(self, pct_m_name, float(usage/float(limit)), tags)
+                        self.gauge(pct_m_name, float(usage/float(limit)), tags)
                     else:
                         self.log.debug("No corresponding usage found for metric %s and "
                                        "container %s, skipping usage_pct for now." % (pct_m_name, c_name))
