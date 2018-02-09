@@ -209,12 +209,19 @@ class KubeletCheck(PrometheusCheck):
         Reports the number of running pods on this node
         tagged by service and creator.
         """
+        tag_counter = {}
         for pod in pods['items']:
             pod_id = pod.get('metadata', {}).get('uid')
-            tags = get_tags('kubernetes_pod://%s' % pod_id, True) or None
+            tags = get_tags('kubernetes_pod://%s' % pod_id, False) or None
             if not tags:
                 continue
-            self.gauge(self.NAMESPACE + '.pods.running', 1, tags)
+            hash_tags = tuple(sorted(tags))
+            if hash_tags in tag_counter.keys():
+                tag_counter[hash_tags] += 1
+            else:
+                tag_counter[hash_tags] = 1
+        for tags, count in tag_counter.iteritems():
+            self.gauge(self.NAMESPACE + '.pods.running', count, list(tags))
 
     def _report_container_spec_metrics(self, pod_list, instance_tags):
         """Reports pod requests & limits by looking at pod specs."""
