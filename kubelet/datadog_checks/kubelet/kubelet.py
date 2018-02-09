@@ -63,15 +63,7 @@ class KubeletCheck(PrometheusCheck):
             raise Exception('Kubelet check only supports one configured instance.')
         inst = instances[0] if instances else None
 
-        self.kubelet_conn_info = get_connection_info()
-        if not self.kubelet_conn_info.get('url'):
-            raise Exception("Couldn't determine the kubelet URL, kubelet check won't proceed.")
-
         self.kube_node_labels = inst.get('node_labels_to_host_tags', {})
-        self.pod_list_url = urljoin(self.kubelet_conn_info['url'], POD_LIST_PATH)
-        self.kube_health_url = urljoin(self.kubelet_conn_info['url'], KUBELET_HEALTH_PATH)
-        self.node_spec_url = urljoin(self.kubelet_conn_info['url'], NODE_SPEC_PATH)
-
         self.metrics_mapper = {
             'kubelet_runtime_operations_errors': 'kubelet.runtime.errors',
         }
@@ -107,13 +99,18 @@ class KubeletCheck(PrometheusCheck):
         self.mem_usage_bytes = {}
 
     def check(self, instance):
+        self.kubelet_conn_info = get_connection_info()
         endpoint = instance.get('metrics_endpoint') or self.kubelet_conn_info.get('url')
         if endpoint is None:
             raise CheckException("Unable to find metrics_endpoint in config "
                                  "file or detect the kubelet URL automatically.")
 
-        send_buckets = instance.get('send_histograms_buckets', True)
+        self.pod_list_url = urljoin(endpoint, POD_LIST_PATH)
+        self.kube_health_url = urljoin(endpoint, KUBELET_HEALTH_PATH)
+        self.node_spec_url = urljoin(endpoint, NODE_SPEC_PATH)
+
         # By default we send the buckets.
+        send_buckets = instance.get('send_histograms_buckets', True)
         if send_buckets is not None and str(send_buckets).lower() == 'false':
             send_buckets = False
         else:
@@ -125,8 +122,8 @@ class KubeletCheck(PrometheusCheck):
             pod_list = None
 
         instance_tags = instance.get('tags', [])
-        self._report_node_metrics(instance_tags)
         self._perform_kubelet_check(instance_tags)
+        self._report_node_metrics(instance_tags)
         self._report_pods_running(pod_list, instance_tags)
         self._report_container_spec_metrics(pod_list, instance_tags)
         self.process(endpoint, send_histograms_buckets=send_buckets, instance=instance)
@@ -227,9 +224,7 @@ class KubeletCheck(PrometheusCheck):
     def _report_container_spec_metrics(self, pod_list, instance_tags):
         """Reports pod requests & limits by looking at pod specs."""
         for pod in pod_list['items']:
-            pod_meta = pod.get('metadata', {})
-            _, pod_name = pod_meta.get('namespace'), pod_meta.get('name')
-
+            pod_name = pod.get('metadata', {}).get('name')
             if not pod_name:
                 continue
 
